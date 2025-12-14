@@ -5,7 +5,9 @@ const { Pool } = require('pg');
 const cloudinary = require('cloudinary').v2;
 const {memoryStorage} = require("multer");
 const multer = require("multer");
+const path = require("path");
 require('dotenv').config();
+
 
 const app = express();
 
@@ -43,7 +45,7 @@ const uploadToCloudinary = async (fileBuffer, fileName, options = {}) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
                 folder: 'products',
-                public_id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                public_id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
                 resource_type: 'auto',
                 overwrite: false,
                 ...options
@@ -94,21 +96,27 @@ const deleteFromCloudinary = async (imageUrl) => {
 };
 
 // Configure Multer for memory storage
-const storage = memoryStorage();
+const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
     limits: {
-        fileSize: 5 * 1024 * 1024 // 5MB limit
+        fileSize: 5 * 1024 * 1024
     },
     fileFilter: function (req, file, cb) {
-        const allowedTypes = /jpeg|jpg|png|gif|webp/;
-        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-        const mimetype = allowedTypes.test(file.mimetype);
+        // Define allowed MIME types
+        const allowedMimeTypes = [
+            'image/jpeg',
+            'image/jpg',
+            'image/png',
+            'image/gif',
+            'image/webp'
+        ];
 
-        if (mimetype && extname) {
-            return cb(null, true);
+        // Check MIME type
+        if (allowedMimeTypes.includes(file.mimetype)) {
+            cb(null, true);
         } else {
-            cb(new Error('Only image files are allowed (jpeg, jpg, png, gif, webp)'));
+            cb(new Error('Invalid file type. Only images (jpeg, jpg, png, gif, webp) are allowed.'));
         }
     }
 });

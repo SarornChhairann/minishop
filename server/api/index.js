@@ -2,11 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { Pool } = require('pg');
-const fs = require("node:fs");
-const {diskStorage} = require("multer");
+const cloudinary = require('cloudinary').v2;
+const {memoryStorage} = require("multer");
 const multer = require("multer");
-const {join} = require("node:path");
-const path = require("node:path");
 require('dotenv').config();
 
 const app = express();
@@ -24,7 +22,7 @@ const getPool = () => {
         pool = new Pool({
             connectionString: process.env.DATABASE_URL,
             ssl: { rejectUnauthorized: false },
-            max: 1, // Important for serverless - use 1 connection
+            max: 1,
             idleTimeoutMillis: 30000,
             connectionTimeoutMillis: 5000
         });
@@ -32,24 +30,71 @@ const getPool = () => {
     return pool;
 };
 
-// Configure Multer for file uploads
-const uploadDir = join(__dirname, "../",process.env.PRODUCT_IMAGE_PATH); // product path
-
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-    console.log('📁 Created upload directory:', uploadDir);
-}
-
-const storage = diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadDir);
-    },
-    filename: function (req, file, cb) {
-        const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
-        cb(null, uniqueName);
-    }
+// Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+// Upload to Cloudinary function
+const uploadToCloudinary = async (fileBuffer, fileName, options = {}) => {
+    return new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+            {
+                folder: 'products',
+                public_id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                resource_type: 'auto',
+                overwrite: false,
+                ...options
+            },
+            (error, result) => {
+                if (error) reject(error);
+                else resolve(result);
+            }
+        );
+
+        const { Readable } = require('stream');
+        const stream = Readable.from(fileBuffer);
+        stream.pipe(uploadStream);
+    });
+};
+
+// Delete from Cloudinary function
+const deleteFromCloudinary = async (imageUrl) => {
+    try {
+        if (!imageUrl || !imageUrl.includes('cloudinary.com')) {
+            console.log('Not a Cloudinary URL, skipping deletion');
+            return true;
+        }
+
+        // Extract public_id from Cloudinary URL
+        const regex = /\/upload\/(?:v\d+\/)?(.+?)\.(?:jpg|png|gif|webp|jpeg)/;
+        const match = imageUrl.match(regex);
+
+        if (!match || !match[1]) {
+            console.error('Could not extract public_id from URL:', imageUrl);
+            return false;
+        }
+
+        const publicId = match[1];
+        const result = await cloudinary.uploader.destroy(publicId);
+
+        if (result.result === 'ok') {
+            console.log(`Deleted image: ${publicId}`);
+            return true;
+        } else {
+            console.error('Failed to delete image:', result);
+            return false;
+        }
+    } catch (error) {
+        console.error('Error deleting from Cloudinary:', error);
+        return false;
+    }
+};
+
+// Configure Multer for memory storage
+const storage = memoryStorage();
 const upload = multer({
     storage: storage,
     limits: {
@@ -68,19 +113,73 @@ const upload = multer({
     }
 });
 
-app.use('/uploads', express.static(join(__dirname, '../uploads')));
+app.get('/api/images/:publicId', async (req, res) => {
+    try {
+        let publicId = req.params.publicId;
+
+        // Decode URL-encoded public_id
+        if (publicId) {
+            publicId = decodeURIComponent(publicId);
+        }
+
+        if (!publicId) {
+            return res.status(400).json({ error: 'Public ID is required' });
+        }
+
+        const options = req.query;
+
+        // Generate Cloudinary URL with transformations
+        const defaultOptions = {
+            width: options.width || 800,
+            height: options.height || null,
+            crop: options.crop || 'limit',
+            quality: options.quality || 'auto',
+            format: options.format || 'auto',
+            fetch_format: options.fetch_format || 'auto',
+            ...options
+        };
+
+        // Remove null/undefined options
+        Object.keys(defaultOptions).forEach(key => {
+            if (defaultOptions[key] === null || defaultOptions[key] === undefined) {
+                delete defaultOptions[key];
+            }
+        });
+
+        // Generate image URL
+        const imageUrl = cloudinary.url(publicId, {
+            ...defaultOptions,
+            secure: true,
+            sign_url: process.env.NODE_ENV === 'production'
+        });
+
+        res.redirect(302, imageUrl);
+
+    } catch (error) {
+        console.error('Error generating Cloudinary URL:', error);
+
+        // Return error or placeholder image
+        if (error.http_code === 404) {
+            return res.status(404).json({ error: 'Image not found' });
+        }
+
+        res.status(500).json({
+            error: 'Failed to generate image URL',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
 
 app.get('/api/products', async (req, res) => {
     try {
         const { status, search } = req.query;
-        const pool = getPool();
 
         // Build WHERE conditions dynamically
         const conditions = [];
         const params = [];
         let paramIndex = 1;
 
-        // Status filter
+        // Status filter - if not provided, show all
         if (status && status.toLowerCase() !== 'all') {
             conditions.push(`status = $${paramIndex}`);
             params.push(status.toUpperCase());
@@ -101,28 +200,19 @@ app.get('/api/products', async (req, res) => {
         }
 
         const query = `
-            SELECT * FROM products 
-            ${whereClause}
-            ORDER BY product_id
+          SELECT * FROM products 
+          ${whereClause}
+          ORDER BY product_id
         `;
 
         const result = await pool.query(query, params);
-
-        result.rows.forEach(row => {
-            if (row.image_url) {
-                if (!row.image_url.startsWith('http')) {
-                    row.image_url = `${process.env.BASE_URL}/${process.env.PRODUCT_IMAGE_PATH}/${row.image_url}`;
-                }
-            }
-        });
-
         res.json(result.rows);
 
     } catch (err) {
         console.error('❌ Error fetching products:', err);
         res.status(500).json({
             error: 'Internal server error',
-            details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            details: err.message
         });
     }
 });
@@ -130,17 +220,12 @@ app.get('/api/products', async (req, res) => {
 app.get('/api/products/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const pool = getPool();
-
-        const result = await pool.query('SELECT * FROM products WHERE product_id = $1', [id]);
+        const result = await pool.query('SELECT * FROM products WHERE product_id = $1 ', [id]);
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Product not found' });
         }
-
+        // Convert relative path to full URL
         const product = result.rows[0];
-        if (product.image_url && !product.image_url.startsWith('http')) {
-            product.image_url = `${process.env.BASE_URL}/${process.env.PRODUCT_IMAGE_PATH}/${product.image_url}`;
-        }
         res.json(product);
     } catch (err) {
         console.error(err);
@@ -148,7 +233,6 @@ app.get('/api/products/:id', async (req, res) => {
     }
 });
 
-// For Vercel: Remove multer uploads - use cloud storage instead
 app.post('/api/products', upload.single('image'), async (req, res) => {
     try {
         const { name, description, price, stock, status } = req.body;
@@ -157,30 +241,24 @@ app.post('/api/products', upload.single('image'), async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields: name, price, stock' });
         }
 
-        let imagePath = '';
+        let imageUrl = '';
+
         if (req.file) {
-            // Store relative path
-            imagePath = req.file.filename;
+            // Upload to cloud storage
+            const uploadResult = await uploadToCloudinary(req.file.buffer, req.file.originalname);
+            imageUrl = uploadResult.secure_url; // Use secure_url instead of url
         }
 
         const pool = getPool();
+
         const result = await pool.query(
             'INSERT INTO products (name, description, price, stock, image_url, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-            [name, description, parseFloat(price), parseInt(stock), imagePath, status || 'ACTIVE']
+            [name, description, parseFloat(price), parseInt(stock), imageUrl, status || 'ACTIVE']
         );
 
-        result.rows[0].image_url = `${process.env.BASE_URL}/${process.env.PRODUCT_IMAGE_PATH}/${result.rows[0].image_url}`;
         res.status(201).json(result.rows[0]);
     } catch (err) {
-        console.error('❌ Error creating product:', err);
-
-        if(req.file){
-            const imagePath = join(__dirname, process.env.PRODUCT_IMAGE_PATH, req.file.filename);
-            if(fs.existsSync(imagePath)){
-                fs.unlinkSync(imagePath);
-            }
-        }
-
+        console.error('Error creating product:', err);
         res.status(500).json({
             error: 'Internal server error',
             details: process.env.NODE_ENV === 'development' ? err.message : undefined
@@ -202,45 +280,40 @@ app.put('/api/products/:id', upload.single('image'), async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields: name, price, stock' });
         }
 
-        const exitImage = await client.query(
+        // Get existing product
+        const existingProduct = await client.query(
             'SELECT image_url FROM products WHERE product_id = $1',
             [id]
         );
 
-        let imagePath = '';
-        if(req.file){
-            imagePath = join(__dirname, process.env.PRODUCT_IMAGE_PATH, exitImage.rows[0].image_url);
-            if(fs.existsSync(imagePath)){
-                fs.unlinkSync(imagePath);
-            }
-            imagePath = req.file.filename;
-        }
-
-        const result = await client.query(
-            'UPDATE products SET name = $1, description = $2, price = $3, stock = $4, image_url = $5, status = $6 WHERE product_id = $7 RETURNING *',
-            [name, description, parseFloat(price), parseInt(stock), imagePath, status || 'ACTIVE', id]
-        );
-
-        if (result.rows.length === 0) {
+        if (existingProduct.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Product not found' });
         }
 
-        await client.query('COMMIT');
+        let imageUrl = existingProduct.rows[0].image_url;
 
-        result.rows[0].image_url = `${process.env.BASE_URL}/${process.env.PRODUCT_IMAGE_PATH}/${result.rows[0].image_url}`;
+        if (req.file) {
+            // Delete old image if it exists
+            if (imageUrl) {
+                await deleteFromCloudinary(imageUrl);
+            }
+
+            // Upload new image to cloud storage
+            const uploadResult = await uploadToCloudinary(req.file.buffer, req.file.originalname);
+            imageUrl = uploadResult.secure_url;
+        }
+
+        const result = await client.query(
+            'UPDATE products SET name = $1, description = $2, price = $3, stock = $4, image_url = $5, status = $6 WHERE product_id = $7 RETURNING *',
+            [name, description, parseFloat(price), parseInt(stock), imageUrl, status || 'ACTIVE', id]
+        );
+
+        await client.query('COMMIT');
         res.json(result.rows[0]);
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error('❌ Error updating product:', err);
-
-        if(req.file){
-            const imagePath = join(__dirname, process.env.PRODUCT_IMAGE_PATH, req.file.filename);
-            if(fs.existsSync(imagePath)){
-                fs.unlinkSync(imagePath);
-            }
-        }
-
+        console.error('Error updating product:', err);
         res.status(500).json({
             error: 'Internal server error',
             details: process.env.NODE_ENV === 'development' ? err.message : undefined
@@ -276,6 +349,11 @@ app.delete('/api/products/:id', async (req, res) => {
         if (result.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Product not found' });
+        }
+
+        const imageUrl = result.rows[0].image_url;
+        if(imageUrl){
+            await deleteFromCloudinary(imageUrl);
         }
 
         await client.query('COMMIT');
@@ -447,6 +525,6 @@ module.exports = app;
 if (process.env.NODE_ENV !== 'production' && require.main === module) {
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
-        console.log(`🚀 Server running locally on http://localhost:${PORT}`);
+        console.log(`Server running locally on http://localhost:${PORT}`);
     });
 }

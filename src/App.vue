@@ -60,7 +60,7 @@ import { RouterView, RouterLink, useRoute } from 'vue-router'
 import { ref, computed, watch } from 'vue'
 
 const route = useRoute()
-const showDebug = ref(true)
+const showDebug = ref(false)
 const forceUpdateCounter = ref(0)
 
 const currentRoute = computed(() => route.path)

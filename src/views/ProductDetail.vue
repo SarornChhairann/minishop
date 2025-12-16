@@ -160,7 +160,7 @@ function decrementQuantity() {
 function addToCart() {
   if(product.value && cartStore.items.length > 0){
     const item = cartStore.items.find((e)=> e.product_id == product.value.product_id);
-    if(item && item?.quantity >= product.value.stock){
+    if(item && (item?.quantity >= product.value.stock || (quantity.value + item.quantity) >= product.value.stock)){
       toast.error(`Influenced stock: ${product.value.stock}`)
     } else {
       cartStore.addToCart({

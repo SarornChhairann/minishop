@@ -21,8 +21,8 @@
             >
               <div class="relative inline-block">
                 Cart
-                <span v-if="cartStore.totalItems > 0" class="absolute -top-2 -right-2 inline-flex items-center justify-center h-5 w-5 text-xs font-bold leading-none text-white bg-red-500 rounded-full">
-                  {{ cartStore.totalItems }}
+                <span v-if="cartStore.items.length > 0" class="absolute -top-2 -right-2 inline-flex items-center justify-center h-5 w-5 text-xs font-bold leading-none text-white bg-red-500 rounded-full">
+                  {{ cartStore.items.length }}
                 </span>
               </div>
             </router-link>

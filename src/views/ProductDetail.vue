@@ -117,7 +117,6 @@ import { useCartStore } from '../stores/cart';
 import {formatDate} from "@/composables/useDateFormatter.ts";
 import {useToast} from "@/composables/useToast.ts";
 
-
 const route = useRoute();
 const cartStore = useCartStore();
 
@@ -158,23 +157,36 @@ function decrementQuantity() {
 }
 
 function addToCart() {
-  if(product.value && cartStore.items.length > 0){
-    const item = cartStore.items.find((e)=> e.product_id == product.value.product_id);
-    if(item && (item?.quantity >= product.value.stock || (quantity.value + item.quantity) >= product.value.stock)){
-      toast.error(`Influenced stock: ${product.value.stock}`)
-    } else {
-      cartStore.addToCart({
-        product_id: product.value.product_id,
-        name: product.value.name,
-        price: product.value.price,
-        quantity: quantity.value,
-        image_url: product.value.image_url,
-        availableStock: product.value.stock,
-      });
+  if (!product.value) return;
 
-      toast.success(`${quantity.value} ${product.value.name} added to cart!`)
+  const { product_id, name, price, stock, image_url } = product.value;
+  const selectedQuantity = quantity.value;
+  const cartItemData = {
+    product_id,
+    name,
+    price,
+    quantity: selectedQuantity,
+    image_url,
+    availableStock: stock,
+  };
+
+  // Check for existing item if cart has items
+  if (cartStore.items.length > 0) {
+    const existingItem = cartStore.items.find(item => item.product_id === product_id);
+
+    if (existingItem) {
+      const wouldExceedStock = existingItem.quantity >= stock ||
+          (selectedQuantity + existingItem.quantity) > stock;
+
+      if (wouldExceedStock) {
+        toast.error(`Insufficient stock: ${stock} available`);
+        return;
+      }
     }
   }
+
+  cartStore.addToCart(cartItemData);
+  toast.success(`${selectedQuantity} ${name} added to cart!`);
 }
 
 // Watch for route changes
